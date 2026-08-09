@@ -529,7 +529,7 @@ def view_dashboard():
 # 7. VIEW: AGENTS
 # ==========================================
 def view_agents():
-    st.title("👥 Agents")
+    st.title(" Agents")
     st.caption("Find an agent, then open their calls.")
 
     thirty_days_ago = (datetime.now().date() - timedelta(days=30)).isoformat()
@@ -544,7 +544,7 @@ def view_agents():
     """, (thirty_days_ago,))
 
     if not df_top.empty:
-        st.markdown("##### 🏆 Top Performers (Last 30 Days)")
+        st.markdown("##### Top Performers (Last 30 Days)")
         tp_cols = st.columns(len(df_top))
         for col, (_, row) in zip(tp_cols, df_top.iterrows()):
             call_word = "call" if row['call_count'] == 1 else "calls"
@@ -822,7 +822,7 @@ def view_call_report():
                 "QA Score", min_value=0.0, max_value=10.0, step=0.1,
                 value=float(call_data['qa_score']),
             )
-            if st.form_submit_button("💾 Save Score"):
+            if st.form_submit_button(" Save Score"):
                 new_score = round(new_score, 1)
                 new_status = "Passed" if new_score >= 8.0 else ("Warning" if new_score >= 5.0 else "Critical")
                 execute_query(
