@@ -1,6 +1,10 @@
 import json
 import os
+import random
 import sqlite3
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -18,6 +22,18 @@ SERVER_GROQ_KEY = SERVER_GROQ_KEY or os.environ.get("GROQ_API_KEY", "")
 
 DB_FILE = "enterprise_qa.db"
 BANNED_WORDS_FILE = "banned_words.json"
+AUDIO_DIR = "audio_store"
+os.makedirs(AUDIO_DIR, exist_ok=True)
+
+# ---- Pipeline tuning -------------------------------------------------------
+# Workers = how many calls are in flight at once. Keep this at or below your
+# Groq RPM budget divided by 2 (each call = 1 Whisper request + 1 LLM request).
+DEFAULT_WORKERS = 4
+# Files are processed in chunks. Each chunk is committed to SQLite before the
+# next one starts, so a crash or closed tab loses at most one chunk.
+CHUNK_SIZE = 25
+MAX_RETRIES = 5
+RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 st.set_page_config(
     page_title="QA Operations Console",
@@ -30,7 +46,12 @@ st.set_page_config(
 # 2. DATABASE HELPERS
 # ==========================================
 def get_conn():
-    return sqlite3.connect(DB_FILE)
+    # timeout: wait for a lock instead of instantly raising "database is locked".
+    # WAL: lets readers (the dashboard) work while a batch is writing.
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
 
 
 def init_db():
@@ -84,6 +105,30 @@ def execute_query(query, params=()):
         c = conn.cursor()
         c.execute(query, params)
         conn.commit()
+    finally:
+        conn.close()
+
+
+def execute_batch(statements):
+    """Run several executemany() writes inside ONE transaction.
+
+    statements: list of (sql, list_of_param_tuples)
+
+    This matters less for speed than the advice you were given suggests — the
+    real win is atomicity. Previously a `calls` row could be committed and the
+    matching `reports` row lost if anything failed in between, leaving an
+    orphaned call with no report attached to it.
+    """
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        for sql, rows in statements:
+            if rows:
+                c.executemany(sql, rows)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -791,61 +836,50 @@ def view_call_report():
 # ==========================================
 # 10. VIEW: RUN AI AUDIT (multi-file)
 # ==========================================
-def view_auditor():
-    st.title("Analyze Call")
+# ==========================================
+# AUDIT PIPELINE (thread-safe — no Streamlit calls in here)
+# ==========================================
+def _retry_after_seconds(exc):
+    """Honour the server's own Retry-After / reset headers when it sends them."""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None) or {}
+    for key in ("retry-after", "x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+        raw = headers.get(key) or headers.get(key.title())
+        if not raw:
+            continue
+        text = str(raw).strip().lower()
+        try:
+            if text.endswith("ms"):
+                return float(text[:-2]) / 1000.0
+            return float(text.rstrip("s"))
+        except ValueError:
+            continue
+    return None
 
-    with st.form("audit_form"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            agent_id = st.text_input(" Employee ID", placeholder="EMP001")
-        with c2:
-            agent_name = st.text_input(" Agent Name", placeholder="John Doe")
-        with c3:
-            agent_team = st.text_input(" Team leader", placeholder="Tech Support")
 
-        uploaded_files = st.file_uploader(
-            " Upload Audio Records (multiple allowed)",
-            type=["mp3", "wav", "m4a"],
-            accept_multiple_files=True,
-        )
-        submit_btn = st.form_submit_button(" Run ", type="primary")
+def call_with_backoff(fn, *args, **kwargs):
+    """Exponential backoff with jitter on rate limits and transient 5xx.
 
-    if submit_btn:
-        if not agent_id or not agent_name or not uploaded_files:
-            st.error(" Please fill in all agent details and upload at least one audio file.")
-        elif not SERVER_GROQ_KEY:
-            st.error(" No API key configured. Add API_KEY.")
-        else:
-            client = OpenAI(api_key=SERVER_GROQ_KEY, base_url="https://api.groq.com/openai/v1")
-            banned_rules = load_banned_rules()
+    fn is called fresh on every attempt, so file handles must be opened inside
+    it — a consumed file object cannot be re-sent on retry.
+    """
+    delay = 2.0
+    for attempt in range(MAX_RETRIES):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status is None:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status not in RETRYABLE_STATUS or attempt == MAX_RETRIES - 1:
+                raise
+            wait = _retry_after_seconds(exc) or delay
+            time.sleep(min(wait, 60) + random.uniform(0, 1.0))
+            delay = min(delay * 2, 60)
 
-            # Register the agent once — not once per file.
-            execute_query(
-                "INSERT OR IGNORE INTO agents (id, name, team, email) VALUES (?, ?, ?, ?)",
-                (agent_id, agent_name, agent_team, f"{agent_id}@company.com"),
-            )
 
-            total_files = len(uploaded_files)
-            progress_bar = st.progress(0.0)
-            status_area = st.container()
-            new_calls = []
-            success_count = 0
-
-            for index, uploaded_file in enumerate(uploaded_files):
-                try:
-                    call_uid = f"CALL_{datetime.now().strftime('%Y%m%d%H%M%S')}_{index}"
-                    ext = os.path.splitext(uploaded_file.name)[1] or ".mp3"
-                    audio_path = f"temp_{call_uid}{ext}"
-                    with open(audio_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-
-                    with open(audio_path, "rb") as audio_file:
-                        transcript_response = client.audio.transcriptions.create(
-                            model="whisper-large-v3", file=audio_file
-                        )
-                    transcript_text = transcript_response.text
-
-                    prompt = f"""
+def build_audit_prompt(transcript_text, banned_rules):
+    return f"""
                     You are a strict Senior Quality Assurance Auditor. Your job is NOT to coach on politeness or style, but to find STRICT GRAMMATICAL ERRORS ONLY, and verify structural requirements.
 
                     IMPORTANT:
@@ -905,85 +939,237 @@ def view_auditor():
                     }}
                     """
 
-                    response = client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        response_format={"type": "json_object"},
-                        messages=[{"role": "user", "content": prompt}],
-                    )
 
-                    try:
-                        result = json.loads(response.choices[0].message.content)
-                    except json.JSONDecodeError:
+def score_result(result):
+    """Pure scoring — identical weights to the original, just factored out."""
+    grammar_errs = result.get("grammar_errors", [])
+    banned_words = result.get("banned_words_found", [])
+    offensive_words = result.get("offensive_words_found", [])
+    general_profanity = result.get("general_profanity_found", [])
+    arabic_detected = result.get("arabic_detected", False)
+    arabic_words_found = result.get("arabic_words_found", [])
+    # Default to True (no penalty) if the model omits the field, so a
+    # missing key never silently costs the agent a point.
+    formal_greeting_made = result.get("formal_greeting_made", True)
+
+    grammar_penalty = min(len(grammar_errs) * 0.15, 2.0)
+    # general_profanity is weighted the same as configured offensive words (-2.0 each) —
+    # no separate weight was specified, so this matches the existing tier.
+    offensive_penalty = (len(offensive_words) + len(general_profanity)) * 2.0
+    banned_penalty = len(banned_words) * 1.0
+    greeting_penalty = 0.0 if formal_greeting_made else 1.0
+
+    grammar_score = round(max(0.0, 10.0 - grammar_penalty), 1)
+    final_score = round(
+        max(0.0, 10.0 - grammar_penalty - offensive_penalty - banned_penalty - greeting_penalty), 1
+    )
+
+    call_status = "Passed" if final_score >= 8.0 else ("Warning" if final_score >= 5.0 else "Critical")
+    profanity_flag = 1 if (result.get("has_profanity") or offensive_words or general_profanity) else 0
+
+    all_violations = banned_words + offensive_words + general_profanity
+    if not formal_greeting_made:
+        all_violations.append("Missing formal greeting at the beginning of the call.")
+    if arabic_detected:
+        # Informational only — doesn't affect qa_score unless you ask for a penalty too.
+        if arabic_words_found:
+            all_violations.append(f"Arabic language detected: {', '.join(arabic_words_found)}")
+        else:
+            all_violations.append("Arabic language detected during the call.")
+
+    return {
+        "final_score": final_score,
+        "grammar_score": grammar_score,
+        "call_status": call_status,
+        "profanity_flag": profanity_flag,
+        "all_violations": all_violations,
+        "grammar_errs": grammar_errs,
+    }
+
+
+def process_one_call(client, banned_rules, filename, audio_bytes, call_uid):
+    """Runs in a worker thread. Returns a plain dict — never touches st.* or the DB."""
+    ext = os.path.splitext(filename)[1] or ".mp3"
+    audio_path = os.path.join(AUDIO_DIR, f"{call_uid}{ext}")
+    try:
+        with open(audio_path, "wb") as f:
+            f.write(audio_bytes)
+
+        def _transcribe():
+            # Re-opened per attempt: a spent file handle can't be replayed on retry.
+            with open(audio_path, "rb") as fh:
+                return client.audio.transcriptions.create(model="whisper-large-v3", file=fh)
+
+        transcript_text = call_with_backoff(_transcribe).text
+
+        response = call_with_backoff(
+            client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": build_audit_prompt(transcript_text, banned_rules)}],
+        )
+
+        try:
+            result = json.loads(response.choices[0].message.content)
+        except json.JSONDecodeError:
+            return {"ok": False, "filename": filename, "error": "couldn't parse the AI's response"}
+
+        scored = score_result(result)
+        return {
+            "ok": True,
+            "filename": filename,
+            "call_uid": call_uid,
+            "audio_path": audio_path,
+            "transcript_text": transcript_text,
+            "result": result,
+            **scored,
+        }
+    except Exception as exc:
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+        return {"ok": False, "filename": filename, "error": str(exc)}
+
+
+def audio_store_size_mb():
+    total = 0
+    for name in os.listdir(AUDIO_DIR):
+        path = os.path.join(AUDIO_DIR, name)
+        if os.path.isfile(path):
+            total += os.path.getsize(path)
+    return total / (1024 * 1024)
+
+
+def view_auditor():
+    st.title("Analyze Call")
+
+    with st.form("audit_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            agent_id = st.text_input(" Employee ID", placeholder="EMP001")
+        with c2:
+            agent_name = st.text_input(" Agent Name", placeholder="John Doe")
+        with c3:
+            agent_team = st.text_input(" Team leader", placeholder="Tech Support")
+
+        uploaded_files = st.file_uploader(
+            " Upload Audio Records (multiple allowed)",
+            type=["mp3", "wav", "m4a"],
+            accept_multiple_files=True,
+        )
+        workers = st.slider(
+            "Calls processed in parallel",
+            min_value=1,
+            max_value=12,
+            value=DEFAULT_WORKERS,
+            help=(
+                "Each call costs 1 Whisper request + 1 LLM request. Keep this below "
+                "half your Groq requests-per-minute allowance. Raise it only after "
+                "upgrading off the free tier."
+            ),
+        )
+        submit_btn = st.form_submit_button(" Run ", type="primary")
+
+    if submit_btn:
+        if not agent_id or not agent_name or not uploaded_files:
+            st.error(" Please fill in all agent details and upload at least one audio file.")
+        elif not SERVER_GROQ_KEY:
+            st.error(" No API key configured. Add API_KEY.")
+        else:
+            client = OpenAI(api_key=SERVER_GROQ_KEY, base_url="https://api.groq.com/openai/v1")
+            banned_rules = load_banned_rules()
+
+            # Register the agent once — not once per file.
+            execute_query(
+                "INSERT OR IGNORE INTO agents (id, name, team, email) VALUES (?, ?, ?, ?)",
+                (agent_id, agent_name, agent_team, f"{agent_id}@company.com"),
+            )
+
+            total_files = len(uploaded_files)
+            progress_bar = st.progress(0.0)
+            status_area = st.container()
+            new_calls = []
+            success_count = 0
+            done_count = 0
+
+            call_rows = []
+            report_rows = []
+
+            # Chunked so that (a) peak memory stays bounded and (b) each chunk is
+            # committed before the next starts — a closed tab loses one chunk, not
+            # the whole batch.
+            for chunk_start in range(0, total_files, CHUNK_SIZE):
+                chunk = uploaded_files[chunk_start:chunk_start + CHUNK_SIZE]
+                call_rows.clear()
+                report_rows.clear()
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {}
+                    for uploaded_file in chunk:
+                        # uuid4, not a timestamp+index: two batches submitted in the
+                        # same second both started at index 0 and collided on the
+                        # primary key.
+                        call_uid = f"CALL_{uuid.uuid4().hex[:12].upper()}"
+                        future = pool.submit(
+                            process_one_call,
+                            client,
+                            banned_rules,
+                            uploaded_file.name,
+                            uploaded_file.getbuffer().tobytes(),
+                            call_uid,
+                        )
+                        futures[future] = uploaded_file.name
+
+                    for future in as_completed(futures):
+                        outcome = future.result()
+                        done_count += 1
+                        progress_bar.progress(done_count / total_files)
+
+                        if not outcome["ok"]:
+                            status_area.markdown(
+                                f"<div class='audit-row-err'> <b>{outcome['filename']}</b> — "
+                                f"{outcome['error']}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            continue
+
+                        result = outcome["result"]
+                        call_rows.append((
+                            outcome["call_uid"], agent_id, str(datetime.now()), "N/A",
+                            outcome["audio_path"], outcome["transcript_text"],
+                            outcome["final_score"], outcome["grammar_score"],
+                            outcome["call_status"], outcome["profanity_flag"],
+                        ))
+                        report_rows.append((
+                            outcome["call_uid"], result.get("language"), result.get("audit_summary"),
+                            json.dumps(outcome["all_violations"]), json.dumps(outcome["grammar_errs"]),
+                            "", result.get("recommended_coaching"),
+                            result.get("sentiment_start"), result.get("sentiment_end"),
+                        ))
+                        new_calls.append((
+                            outcome["call_uid"], outcome["filename"],
+                            outcome["final_score"], outcome["call_status"],
+                        ))
+                        success_count += 1
                         status_area.markdown(
-                            f"<div class='audit-row-err'> <b>{uploaded_file.name}</b> — "
-                            f"couldn't parse the AI's response. Skipping.</div>",
+                            f"<div class='audit-row-ok'> <b>{outcome['filename']}</b> — "
+                            f"{outcome['final_score']}/10 {status_badge(outcome['call_status'])}</div>",
                             unsafe_allow_html=True,
                         )
-                        continue
 
-                    grammar_errs = result.get("grammar_errors", [])
-                    banned_words = result.get("banned_words_found", [])
-                    offensive_words = result.get("offensive_words_found", [])
-                    general_profanity = result.get("general_profanity_found", [])
-                    arabic_detected = result.get("arabic_detected", False)
-                    arabic_words_found = result.get("arabic_words_found", [])
-                    # Default to True (no penalty) if the model omits the field, so a
-                    # missing key never silently costs the agent a point.
-                    formal_greeting_made = result.get("formal_greeting_made", True)
-
-                    grammar_penalty = min(len(grammar_errs) * 0.15, 2.0)
-                    # general_profanity is weighted the same as configured offensive words (-2.0 each) —
-                    # no separate weight was specified, so this matches the existing tier.
-                    offensive_penalty = (len(offensive_words) + len(general_profanity)) * 2.0
-                    banned_penalty = len(banned_words) * 1.0
-                    greeting_penalty = 0.0 if formal_greeting_made else 1.0
-
-                    grammar_score = round(max(0.0, 10.0 - grammar_penalty), 1)
-                    final_score = round(max(0.0, 10.0 - grammar_penalty - offensive_penalty - banned_penalty - greeting_penalty), 1)
-
-                    call_status = "Passed" if final_score >= 8.0 else ("Warning" if final_score >= 5.0 else "Critical")
-                    profanity_flag = 1 if (result.get("has_profanity") or offensive_words or general_profanity) else 0
-
-                    all_violations = banned_words + offensive_words + general_profanity
-                    if not formal_greeting_made:
-                        all_violations.append("Missing formal greeting at the beginning of the call.")
-                    if arabic_detected:
-                        # Informational only — doesn't affect qa_score unless you ask for a penalty too.
-                        if arabic_words_found:
-                            all_violations.append(f"Arabic language detected: {', '.join(arabic_words_found)}")
-                        else:
-                            all_violations.append("Arabic language detected during the call.")
-
-                    execute_query(
-                        """INSERT INTO calls (id, agent_id, date, duration, audio_file, transcription,
+                # One transaction per chunk: calls and their reports land together
+                # or not at all.
+                try:
+                    execute_batch([
+                        ("""INSERT INTO calls (id, agent_id, date, duration, audio_file, transcription,
                                                qa_score, grammar_score, status, profanity_detected)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (call_uid, agent_id, str(datetime.now()), "N/A", audio_path, transcript_text,
-                         final_score, grammar_score, call_status, profanity_flag),
-                    )
-                    execute_query(
-                        """INSERT INTO reports (call_id, language, summary, violations, grammar_feedback, manager_notes, recommended_coaching, sentiment_start, sentiment_end)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (call_uid, result.get("language"), result.get("audit_summary"),
-                         json.dumps(all_violations), json.dumps(grammar_errs), "",
-                         result.get("recommended_coaching"),
-                         result.get("sentiment_start"), result.get("sentiment_end")),
-                    )
-
-                    new_calls.append((call_uid, uploaded_file.name, final_score, call_status))
-                    success_count += 1
-                    status_area.markdown(
-                        f"<div class='audit-row-ok'> <b>{uploaded_file.name}</b> — {final_score}/10 "
-                        f"{status_badge(call_status)}</div>",
-                        unsafe_allow_html=True,
-                    )
-                except Exception as e:
-                    status_area.markdown(
-                        f"<div class='audit-row-err'> <b>{uploaded_file.name}</b> — {e}</div>",
-                        unsafe_allow_html=True,
-                    )
-                finally:
-                    progress_bar.progress((index + 1) / total_files)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", list(call_rows)),
+                        ("""INSERT INTO reports (call_id, language, summary, violations, grammar_feedback,
+                                                 manager_notes, recommended_coaching, sentiment_start, sentiment_end)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", list(report_rows)),
+                    ])
+                except Exception as exc:
+                    success_count -= len(call_rows)
+                    status_area.error(f"Chunk failed to save: {exc}")
 
             st.success(f" Audited {success_count} of {total_files} call(s) for {agent_name}.")
             if new_calls:
