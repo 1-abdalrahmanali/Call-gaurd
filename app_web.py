@@ -558,7 +558,7 @@ def view_agents():
             """, unsafe_allow_html=True)
         st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
-    search = st.text_input("Search agents", placeholder="Search by agent name or employee ID",
+    search = st.text_input("Search agents", placeholder="Search by agent name or agent ID",
                             label_visibility="collapsed")
 
     query = """
@@ -723,7 +723,7 @@ def view_call_report():
     hc1, hc2, hc3, hc4 = st.columns(4)
     hc1.metric("QA Score", f"{call_data['qa_score']}/10")
     if call_data['manually_adjusted']:
-        hc1.caption("✏️ Manually adjusted")
+        hc1.caption(" Manually adjusted")
     with hc2:
         st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
         st.markdown(status_badge(call_data['status']), unsafe_allow_html=True)
@@ -733,7 +733,7 @@ def view_call_report():
         if call_data['status'] == "In Review":
             st.caption("🔵 Already flagged for review")
         else:
-            if st.button("🚩 Flag for Manual Review", use_container_width=True, key=f"flag_{call_id}"):
+            if st.button(" Flag for Manual Review", use_container_width=True, key=f"flag_{call_id}"):
                 execute_query("UPDATE calls SET status = ? WHERE id = ?", ("In Review", call_id))
                 st.success("Flagged for manual review.")
                 st.rerun()
