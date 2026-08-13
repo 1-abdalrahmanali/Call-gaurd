@@ -242,11 +242,11 @@ def id_chip(value):
 
 def sentiment_badge(sentiment):
     styles = {
-        "Positive": ("badge-passed", "🙂"),
-        "Neutral": ("badge-warning", "😐"),
-        "Negative": ("badge-critical", "🙁"),
+        "Positive": ("badge-passed"),
+        "Neutral": ("badge-warning"),
+        "Negative": ("badge-critical"),
     }
-    cls, emoji = styles.get(sentiment, ("badge-warning", "❔"))
+    cls, emoji = styles.get(sentiment, ("badge-warning"))
     return f"<span class='status-badge {cls}'>{emoji} {sentiment or 'Unknown'}</span>"
 
 # ==========================================
@@ -388,7 +388,7 @@ def view_dashboard():
 
     st.markdown("#####  Search")
     search_query = st.text_input(
-        "Search", placeholder="Agent name, employee ID, or call ID",
+        "Search", placeholder="Agent name, Agent ID, or call ID",
         label_visibility="collapsed",
     )
 
@@ -1045,28 +1045,18 @@ def view_auditor():
     with st.form("audit_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
-            agent_id = st.text_input(" Employee ID", placeholder="EMP001")
+            agent_id = st.text_input(" Agent ID", placeholder="The code")
         with c2:
-            agent_name = st.text_input(" Agent Name", placeholder="John Doe")
+            agent_name = st.text_input(" Agent Name", placeholder="all lowercase")
         with c3:
-            agent_team = st.text_input(" Team leader", placeholder="Tech Support")
+            agent_team = st.text_input(" Team leader", placeholder=" all lowercase")
 
         uploaded_files = st.file_uploader(
             " Upload Audio Records (multiple allowed)",
             type=["mp3", "wav", "m4a"],
             accept_multiple_files=True,
         )
-        workers = st.slider(
-            "Calls processed in parallel",
-            min_value=1,
-            max_value=12,
-            value=DEFAULT_WORKERS,
-            help=(
-                "Each call costs 1 Whisper request + 1 LLM request. Keep this below "
-                "half your Groq requests-per-minute allowance. Raise it only after "
-                "upgrading off the free tier."
-            ),
-        )
+
         submit_btn = st.form_submit_button(" Run ", type="primary")
 
     if submit_btn:
