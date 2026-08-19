@@ -54,7 +54,7 @@ def secret(name: str, default: str = "") -> str:
     return str(value or os.environ.get(name, default) or "")
 
 
-GROQ_API_KEY = secret("GROQ_API_KEY")
+SERVER_GROQ_KEY = secret("GROQ_API_KEY")
 APP_PASSWORD = secret("APP_PASSWORD")
 
 # The working directory is ephemeral on most hosts (Streamlit Community Cloud
