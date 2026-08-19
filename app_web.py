@@ -72,8 +72,15 @@ GROQ_BASE_URL = secret("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 # ---- Pipeline tuning -----------------------------------------------------
 # Workers = calls in flight at once. Keep at or below your Groq RPM budget
 # divided by 2 (each file costs 1 Whisper request + 1 LLM request).
-DEFAULT_WORKERS = 4
+# This is a throughput setting, not a user choice — it lives here, not in the
+# UI. Override it with the CALLGUARD_WORKERS secret if your Groq plan allows
+# more concurrency. Keep it at or below your requests-per-minute budget
+# divided by two (each file costs 1 Whisper request + 1 LLM request).
 MAX_WORKERS = 12
+try:
+    AUDIT_WORKERS = max(1, min(MAX_WORKERS, int(secret("CALLGUARD_WORKERS", "4") or 4)))
+except ValueError:
+    AUDIT_WORKERS = 4
 # Files are processed in chunks, each committed before the next starts, so a
 # crash or a closed tab loses at most one chunk.
 CHUNK_SIZE = 25
@@ -96,7 +103,6 @@ WARN_THRESHOLD = 5.0
 
 st.set_page_config(
     page_title=f"{APP_NAME} · QA Operations",
-    page_icon="🎧",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -174,7 +180,8 @@ section[data-testid="stSidebar"] > div {
   width:34px; height:34px; border-radius:9px; flex:0 0 34px;
   background: linear-gradient(140deg, var(--accent), #6E5CE8);
   display:flex; align-items:center; justify-content:center;
-  font-size:16px; box-shadow: var(--shadow-1);
+  font-size:12.5px; font-weight:700; color:#fff; letter-spacing:.04em;
+  box-shadow: var(--shadow-1);
 }
 .cg-brand .name { font-size:15px; font-weight:650; color:var(--text-1); line-height:1.15; }
 .cg-brand .sub  { font-size:11px; color:var(--text-3); letter-spacing:.03em; }
@@ -297,8 +304,7 @@ section[data-testid="stSidebar"] > div {
             border-radius: var(--radius-lg); padding: 16px 18px; }
 .cg-empty { background: var(--surface-1); border:1px dashed var(--border-strong);
             border-radius: var(--radius-lg); padding: 30px 22px; text-align:center; }
-.cg-empty .e-icon { font-size:26px; opacity:.65; }
-.cg-empty .e-title { font-weight:600; color: var(--text-1); margin-top:8px; font-size:14px; }
+.cg-empty .e-title { font-weight:600; color: var(--text-1); font-size:14px; }
 .cg-empty .e-body  { color: var(--text-3); font-size:12.5px; margin-top:4px; }
 
 /* ---------- Table-ish rows ---------- */
@@ -451,12 +457,13 @@ def sentiment_badge(sentiment) -> str:
     ValueError and the Call Report page died on any call that had sentiment.
     """
     styles = {
-        "Positive": ("badge-passed", "🙂"),
-        "Neutral": ("badge-neutral", "😐"),
-        "Negative": ("badge-critical", "🙁"),
+        "Positive": "badge-passed",
+        "Neutral": "badge-neutral",
+        "Negative": "badge-critical",
     }
-    cls, icon = styles.get(sentiment, ("badge-neutral", "❔"))
-    return f"<span class='status-badge {cls}'>{icon} {esc(sentiment or 'Unknown')}</span>"
+    cls = styles.get(sentiment, "badge-neutral")
+    return (f"<span class='status-badge {cls}'><span class='dot'></span>"
+            f"{esc(sentiment or 'Unknown')}</span>")
 
 
 def id_chip(value) -> str:
@@ -485,9 +492,9 @@ def kpi(label, value, sub="", accent="info") -> str:
     )
 
 
-def empty_state(icon, title, body) -> str:
+def empty_state(title, body) -> str:
     return (
-        f"<div class='cg-empty'><div class='e-icon'>{icon}</div>"
+        f"<div class='cg-empty'>"
         f"<div class='e-title'>{esc(title)}</div>"
         f"<div class='e-body'>{esc(body)}</div></div>"
     )
@@ -518,9 +525,9 @@ def row_container():
         return st.container()
 
 
-def toast(message, icon="✅"):
+def toast(message):
     try:
-        st.toast(message, icon=icon)
+        st.toast(message)
     except Exception:  # pragma: no cover
         st.success(message)
 
@@ -758,7 +765,7 @@ def view_login():
     with mid:
         st.markdown(
             "<div class='cg-brand' style='justify-content:center;margin-bottom:14px;'>"
-            "<div class='mark'>🎧</div>"
+            "<div class='mark'>CG</div>"
             f"<div><div class='name' style='font-size:20px;'>{APP_NAME}</div>"
             f"<div class='sub'>{APP_TAGLINE}</div></div></div>",
             unsafe_allow_html=True,
@@ -838,7 +845,6 @@ st.session_state.setdefault("previous_view", None)
 st.session_state.setdefault("last_audited_calls", None)
 st.session_state.setdefault("data_version", 0)
 st.session_state.setdefault("page", 0)
-st.session_state.setdefault("workers", DEFAULT_WORKERS)
 
 
 def navigate_to(view, agent_id=None, call_id=None):
@@ -877,15 +883,15 @@ def active_nav_key():
 # ==========================================================================
 
 NAV_ITEMS = [
-    ("Dashboard", "📊  Dashboard"),
-    ("Agents", "👥  Agents"),
-    ("Auditor", "🎙️  Run audit"),
-    ("Settings", "⚙️  Settings"),
+    ("Dashboard", "Dashboard"),
+    ("Agents", "Agents"),
+    ("Auditor", "Run audit"),
+    ("Settings", "Settings"),
 ]
 
 with st.sidebar:
     st.markdown(
-        "<div class='cg-brand'><div class='mark'>🎧</div>"
+        "<div class='cg-brand'><div class='mark'>CG</div>"
         f"<div><div class='name'>{APP_NAME}</div>"
         f"<div class='sub'>{APP_TAGLINE}</div></div></div>",
         unsafe_allow_html=True,
@@ -916,10 +922,10 @@ with st.sidebar:
 
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
     if not SERVER_GROQ_KEY:
-        st.warning("No API key configured — audits are disabled.", icon="⚠️")
+        st.warning("No API key configured — audits are disabled.")
 
     st.divider()
-    if st.button("⏻  Log out", use_container_width=True, key="logout_btn"):
+    if st.button("Log out", use_container_width=True, key="logout_btn"):
         for key in ("authenticated", "current_view", "selected_agent", "selected_call",
                     "previous_view", "last_audited_calls", "page"):
             st.session_state.pop(key, None)
@@ -1066,10 +1072,10 @@ def score_trend_chart(df: pd.DataFrame, team_avg=None):
 
 STATUS_PRESETS = {
     "All statuses": None,
-    "🟢 Passed only": ["Passed"],
-    "🟡 Needs attention": ["Warning", "Critical"],
-    "🔴 Critical only": ["Critical"],
-    "🔵 In review": ["In Review"],
+    "Passed only": ["Passed"],
+    "Needs attention": ["Warning", "Critical"],
+    "Critical only": ["Critical"],
+    "In review": ["In Review"],
 }
 
 
@@ -1079,7 +1085,7 @@ def view_dashboard():
 
     # --- Filters: one row above the content -------------------------------
     search_query = st.text_input(
-        "Search", placeholder="🔍  Agent name, agent ID, or call ID",
+        "Search", placeholder="Agent name, agent ID, or call ID",
         label_visibility="collapsed", key="dash_search",
     )
 
@@ -1180,7 +1186,7 @@ def view_dashboard():
 
     if not total:
         st.markdown(empty_state(
-            "🗂️", "Nothing matches these filters",
+            "Nothing matches these filters",
             "Try widening the date range, clearing the search box, or choosing All Teams."
         ), unsafe_allow_html=True)
         return
@@ -1198,7 +1204,7 @@ def view_dashboard():
     export = df_calls.copy()
     export["duration"] = export["duration_seconds"].apply(fmt_duration)
     head_right.download_button(
-        "⭳  Export CSV",
+        "Export CSV",
         export.drop(columns=["duration_seconds"]).to_csv(index=False).encode("utf-8"),
         file_name=f"callguard_calls_{datetime.now():%Y%m%d_%H%M}.csv",
         mime="text/csv", use_container_width=True, key="dash_export",
@@ -1223,7 +1229,7 @@ def view_dashboard():
             cols[3].markdown(
                 f"<div class='cg-cell'>{esc(fmt_duration(row['duration_seconds']))}</div>",
                 unsafe_allow_html=True)
-            adjusted = "<div class='sub'>✎ adjusted</div>" if row["manually_adjusted"] else ""
+            adjusted = "<div class='sub'>adjusted</div>" if row["manually_adjusted"] else ""
             cols[4].markdown(score_cell(row["qa_score"]) + adjusted, unsafe_allow_html=True)
             cols[5].markdown(status_badge(row["status"]), unsafe_allow_html=True)
             if cols[6].button("Open →", key=f"open_call_{row['call_id']}",
@@ -1247,7 +1253,7 @@ def view_dashboard():
     """, params)
 
     if df_critical.empty:
-        st.markdown(empty_state("🛡️", "No critical calls in this range",
+        st.markdown(empty_state("No critical calls in this range",
                                 "Every audited call scored at or above 5.0."),
                     unsafe_allow_html=True)
         return
@@ -1321,7 +1327,7 @@ def view_agents():
         st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
     search = st.text_input("Search agents", key="agent_search",
-                           placeholder="🔍  Search by agent name or agent ID",
+                           placeholder="Search by agent name or agent ID",
                            label_visibility="collapsed")
 
     query = """
@@ -1342,7 +1348,7 @@ def view_agents():
 
     if df_agents.empty:
         st.markdown(empty_state(
-            "👥", "No agents yet" if not search else "No agents match that search",
+            "No agents yet" if not search else "No agents match that search",
             "Agents are created automatically the first time you run an audit for them."
         ), unsafe_allow_html=True)
         return
@@ -1442,7 +1448,7 @@ def view_agent_details():
 
     if df_calls.empty:
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-        st.markdown(empty_state("📞", "No calls recorded for this agent yet",
+        st.markdown(empty_state("No calls recorded for this agent yet",
                                 "Upload recordings from the Run audit screen to populate this page."),
                     unsafe_allow_html=True)
         return
@@ -1474,7 +1480,7 @@ def view_agent_details():
             cols[2].markdown(
                 f"<div class='cg-cell'>{esc(fmt_duration(call['duration_seconds']))}</div>",
                 unsafe_allow_html=True)
-            adjusted = "<div class='sub'>✎ adjusted</div>" if call["manually_adjusted"] else ""
+            adjusted = "<div class='sub'>adjusted</div>" if call["manually_adjusted"] else ""
             cols[3].markdown(score_cell(call["qa_score"]) + adjusted, unsafe_allow_html=True)
             cols[4].markdown(status_badge(call["status"]), unsafe_allow_html=True)
             if cols[5].button("Report →", key=f"view_call_{call['call_id']}",
@@ -1543,7 +1549,7 @@ def view_call_report():
     k1, k2, k3, k4 = st.columns(4)
     k1.markdown(kpi(
         "QA score", f"{score:.1f}" if score is not None else "—",
-        "✎ manually adjusted" if call["manually_adjusted"] else f"grammar {float(call['grammar_score'] or 0):.1f}",
+        "manually adjusted" if call["manually_adjusted"] else f"grammar {float(call['grammar_score'] or 0):.1f}",
         "good" if (score or 0) >= PASS_THRESHOLD else ("warn" if (score or 0) >= WARN_THRESHOLD else "crit"),
     ), unsafe_allow_html=True)
     with k2:
@@ -1562,11 +1568,11 @@ def view_call_report():
         if call["status"] == "In Review":
             st.markdown(
                 "<div style='text-align:center;color:var(--info);font-size:12.5px;'>"
-                "🔵 Already flagged for review</div>", unsafe_allow_html=True)
-        elif st.button("⚑  Flag for manual review", use_container_width=True,
+                "Already flagged for review</div>", unsafe_allow_html=True)
+        elif st.button("Flag for manual review", use_container_width=True,
                        key=f"flag_{call_id}"):
             execute_query("UPDATE calls SET status = ? WHERE id = ?", ("In Review", call_id))
-            toast("Flagged for manual review.", "⚑")
+            toast("Flagged for manual review.")
             st.rerun()
 
     st.divider()
@@ -1594,11 +1600,11 @@ def view_call_report():
         if start_sentiment in rank and end_sentiment in rank:
             delta = rank[end_sentiment] - rank[start_sentiment]
             if delta > 0:
-                note, color = "📈  Improved during the call — the agent moved the customer up.", C_GOOD
+                note, color = "Improved during the call — the agent moved the customer up.", C_GOOD
             elif delta < 0:
-                note, color = "📉  Declined during the call — worth listening to.", C_CRIT
+                note, color = "Declined during the call — worth listening to.", C_CRIT
             elif start_sentiment == "Negative":
-                note, color = "⚠️  Stayed negative — no de-escalation.", C_WARN
+                note, color = "Stayed negative — no de-escalation.", C_WARN
             elif start_sentiment == "Positive":
                 note, color = "Held positive throughout.", C_GOOD
             else:
@@ -1613,27 +1619,27 @@ def view_call_report():
     left, right = st.columns([1.35, 1])
 
     with left:
-        with st.expander("🔊  Audio recording", expanded=True):
+        with st.expander("Audio recording", expanded=True):
             audio_file = call["audio_file"]
             if audio_file and os.path.exists(str(audio_file)):
                 st.audio(str(audio_file))
             else:
                 st.info("Audio file archived or unavailable on this host.")
 
-        with st.expander("📝  Executive summary", expanded=True):
+        with st.expander("Executive summary", expanded=True):
             st.write(call["summary"] or "_No summary was generated for this call._")
 
-        with st.expander("🎓  Recommended coaching", expanded=True):
+        with st.expander("Recommended coaching", expanded=True):
             st.write(call["recommended_coaching"] or "_No coaching notes generated._")
 
-        with st.expander("🗒️  Transcript", expanded=False):
+        with st.expander("Transcript", expanded=False):
             transcript = call["transcription"] or ""
             if transcript:
                 st.text_area("Transcript", transcript, height=280,
                              label_visibility="collapsed", disabled=True,
                              key=f"tx_{call_id}")
                 st.download_button(
-                    "⭳  Download transcript",
+                    "Download transcript",
                     transcript.encode("utf-8"),
                     file_name=f"{call_id}_transcript.txt", mime="text/plain",
                     key=f"tx_dl_{call_id}",
@@ -1642,7 +1648,7 @@ def view_call_report():
                 st.caption("No transcript stored.")
 
     with right:
-        with st.expander("🚩  Violations & compliance", expanded=True):
+        with st.expander("Violations & compliance", expanded=True):
             try:
                 violations = as_list(json.loads(call["violations"] or "[]"))
             except (TypeError, ValueError):
@@ -1650,14 +1656,14 @@ def view_call_report():
             if violations:
                 for violation in violations:
                     st.markdown(
-                        f"<div class='audit-row-err'>⚠️ <span>{esc(violation)}</span></div>",
+                        f"<div class='audit-row-err'><span>{esc(violation)}</span></div>",
                         unsafe_allow_html=True)
             else:
                 st.markdown(
-                    "<div class='audit-row-ok'>✅ <span>No compliance violations detected.</span></div>",
+                    "<div class='audit-row-ok'><span>No compliance violations detected.</span></div>",
                     unsafe_allow_html=True)
 
-        with st.expander("✍️  Grammar analysis", expanded=True):
+        with st.expander("Grammar analysis", expanded=True):
             try:
                 grammar = json.loads(call["grammar_feedback"] or "[]")
                 grammar = grammar if isinstance(grammar, list) else []
@@ -1677,16 +1683,16 @@ def view_call_report():
                         st.caption(item["reason"])
             else:
                 st.markdown(
-                    "<div class='audit-row-ok'>✅ <span>No grammar issues detected.</span></div>",
+                    "<div class='audit-row-ok'><span>No grammar issues detected.</span></div>",
                     unsafe_allow_html=True)
 
-        with st.expander("🗒️  Manager notes", expanded=True):
+        with st.expander("Manager notes", expanded=True):
             with st.form(f"notes_form_{call_id}"):
                 notes = st.text_area(
                     "Notes", value=call["manager_notes"] or "", height=110,
                     label_visibility="collapsed",
                     placeholder="Add manager notes for this call…")
-                save_notes = st.form_submit_button("💾  Save notes", type="primary")
+                save_notes = st.form_submit_button("Save notes", type="primary")
             if save_notes:
                 # UPSERT: a call with no report row would otherwise silently
                 # discard the note (UPDATE ... WHERE call_id matched nothing).
@@ -1694,16 +1700,16 @@ def view_call_report():
                     INSERT INTO reports (call_id, manager_notes) VALUES (?, ?)
                     ON CONFLICT(call_id) DO UPDATE SET manager_notes = excluded.manager_notes
                 """, (call_id, notes))
-                toast("Notes saved.", "💾")
+                toast("Notes saved.")
                 st.rerun()
 
-        with st.expander("⚖️  Override score", expanded=False):
+        with st.expander("Override score", expanded=False):
             st.caption("Manually correct the AI score. Status follows automatically.")
             with st.form(f"score_form_{call_id}"):
                 new_score = st.number_input(
                     "QA score", min_value=0.0, max_value=10.0, step=0.1,
                     value=float(score) if score is not None else 0.0)
-                save_score = st.form_submit_button("💾  Save score", type="primary")
+                save_score = st.form_submit_button("Save score", type="primary")
             if save_score:
                 new_score = round(float(new_score), 1)
                 new_status = ("Passed" if new_score >= PASS_THRESHOLD
@@ -1711,7 +1717,7 @@ def view_call_report():
                 execute_query(
                     "UPDATE calls SET qa_score = ?, status = ?, manually_adjusted = 1 WHERE id = ?",
                     (new_score, new_status, call_id))
-                toast(f"Score updated to {new_score:.1f} ({new_status}).", "⚖️")
+                toast(f"Score updated to {new_score:.1f} ({new_status}).")
                 st.rerun()
 
 
@@ -1969,23 +1975,13 @@ def view_auditor():
             "Audio recordings", type=ALLOWED_AUDIO, accept_multiple_files=True)
         st.caption(
             f"Up to {MAX_UPLOAD_MB:.0f} MB per file — anything larger is skipped "
-            "with a note rather than failing mid-batch.")
+            f"with a note rather than failing mid-batch. Files are saved in "
+            f"batches of {CHUNK_SIZE}, so closing the tab costs you at most one batch.")
 
-        adv1, adv2 = st.columns([1, 3])
-        workers = adv1.slider("Parallel workers", 1, MAX_WORKERS,
-                              st.session_state.get("workers", DEFAULT_WORKERS),
-                              help="Keep this at or below your Groq requests-per-minute "
-                                   "budget divided by two.")
-        adv2.markdown(
-            "<div style='color:var(--text-3);font-size:12px;padding-top:34px;'>"
-            f"Files are committed in chunks of {CHUNK_SIZE}, so a closed tab "
-            "costs you at most one chunk.</div>", unsafe_allow_html=True)
-
-        submitted = st.form_submit_button("▶  Run audit", type="primary")
+        submitted = st.form_submit_button("Run audit", type="primary")
 
     if submitted:
-        st.session_state.workers = workers
-        run_audit_batch(agent_id, agent_name, agent_team, uploaded_files, workers)
+        run_audit_batch(agent_id, agent_name, agent_team, uploaded_files)
 
     if st.session_state.get("last_audited_calls"):
         st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
@@ -2010,7 +2006,7 @@ def view_auditor():
             st.rerun()
 
 
-def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files, workers):
+def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files):
     agent_id = (agent_id or "").strip()
     agent_name = (agent_name or "").strip()
     agent_team = (agent_team or "").strip()
@@ -2033,7 +2029,7 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files, workers):
 
     for uploaded, size_mb in rejected:
         st.markdown(
-            f"<div class='audit-row-skip'>⤬ <b>{esc(uploaded.name)}</b> — skipped, "
+            f"<div class='audit-row-skip'><b>{esc(uploaded.name)}</b> — skipped, "
             f"{size_mb:.1f} MB exceeds the {MAX_UPLOAD_MB:.0f} MB limit.</div>",
             unsafe_allow_html=True)
     if not accepted:
@@ -2055,7 +2051,7 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files, workers):
         chunk = files[chunk_start:chunk_start + CHUNK_SIZE]
         call_rows, report_rows, pending, chunk_paths = [], [], [], []
 
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, MAX_WORKERS))) as pool:
+        with ThreadPoolExecutor(max_workers=AUDIT_WORKERS) as pool:
             futures = {}
             for uploaded in chunk:
                 # uuid4, not timestamp+index: two batches submitted in the same
@@ -2075,7 +2071,7 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files, workers):
 
                 if not outcome["ok"]:
                     log.markdown(
-                        f"<div class='audit-row-err'>⤬ <b>{esc(outcome['filename'])}</b> — "
+                        f"<div class='audit-row-err'><b>{esc(outcome['filename'])}</b> — "
                         f"{esc(outcome['error'])}</div>", unsafe_allow_html=True)
                     continue
 
@@ -2098,7 +2094,7 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files, workers):
                 pending.append((outcome["call_uid"], outcome["filename"],
                                 outcome["final_score"], outcome["call_status"]))
                 log.markdown(
-                    f"<div class='audit-row-ok'>✓ <b>{esc(outcome['filename'])}</b> — "
+                    f"<div class='audit-row-ok'><b>{esc(outcome['filename'])}</b> — "
                     f"{outcome['final_score']}/10 {status_badge(outcome['call_status'])}</div>",
                     unsafe_allow_html=True)
 
@@ -2121,7 +2117,7 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files, workers):
             # The originals counted these as successes and offered a
             # "View report" link to a row that was never written.
             log.markdown(
-                f"<div class='audit-row-err'>⤬ <b>{len(call_rows)} file(s)</b> processed but "
+                f"<div class='audit-row-err'><b>{len(call_rows)} file(s)</b> processed but "
                 f"could not be saved — {esc(exc)}</div>", unsafe_allow_html=True)
             for path in chunk_paths:  # don't leave orphaned audio behind
                 try:
@@ -2168,7 +2164,7 @@ def view_settings():
             off_en = o1.text_area("English ", value="\n".join(rules["english_offensive"]), height=130)
             off_es = o2.text_area("Spanish ", value="\n".join(rules["spanish_offensive"]), height=130)
 
-            saved = st.form_submit_button("💾  Save rules", type="primary")
+            saved = st.form_submit_button("Save rules", type="primary")
 
         if saved:
             def clean(text):
@@ -2187,7 +2183,7 @@ def view_settings():
                     "english_offensive": clean(off_en),
                     "spanish_offensive": clean(off_es),
                 })
-                toast("Rules saved. They apply to the next audit you run.", "💾")
+                toast("Rules saved. They apply to the next audit you run.")
             except OSError as exc:
                 st.error(f"Could not save the rules file: {exc}")
 
@@ -2216,9 +2212,7 @@ def view_settings():
             "On Streamlit Community Cloud the container filesystem is wiped on every "
             "restart or redeploy — the database and stored audio go with it. Point "
             "`CALLGUARD_DATA_DIR` at a mounted volume, or move to Postgres/S3, before "
-            "you rely on this for records retention.",
-            icon="⚠️",
-        )
+            "you rely on this for records retention.")
 
         st.markdown("##### Cleanup")
         st.caption("Delete audio files in the store that no call row references any more.")
@@ -2235,7 +2229,7 @@ def view_settings():
                         removed += 1
                     except OSError:
                         pass
-            toast(f"Removed {removed} orphaned file(s).", "🧹")
+            toast(f"Removed {removed} orphaned file(s).")
             st.rerun()
 
     with about_tab:
@@ -2246,6 +2240,7 @@ def view_settings():
     Transcription model &nbsp;<span class='id-chip'>{esc(TRANSCRIBE_MODEL)}</span><br>
     Audit model &nbsp;<span class='id-chip'>{esc(AUDIT_MODEL)}</span><br>
     Endpoint &nbsp;<span class='id-chip'>{esc(GROQ_BASE_URL)}</span><br>
+    Parallel workers &nbsp;<span class='id-chip'>{AUDIT_WORKERS}</span><br>
     API key &nbsp;<span class='id-chip'>{'configured' if SERVER_GROQ_KEY else 'missing'}</span>
   </div>
   <div style='color:var(--text-3);font-size:12px;margin-top:14px;'>
