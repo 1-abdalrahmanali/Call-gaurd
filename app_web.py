@@ -54,7 +54,7 @@ def secret(name: str, default: str = "") -> str:
     return str(value or os.environ.get(name, default) or "")
 
 
-SERVER_GROQ_KEY = secret("GROQ_API_KEY")
+GROQ_API_KEY = secret("GROQ_API_KEY")
 APP_PASSWORD = secret("APP_PASSWORD")
 
 # The working directory is ephemeral on most hosts (Streamlit Community Cloud
@@ -66,7 +66,7 @@ AUDIO_DIR = os.path.join(DATA_DIR, "audio_store")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 TRANSCRIBE_MODEL = secret("GROQ_TRANSCRIBE_MODEL", "whisper-large-v3")
-AUDIT_MODEL = secret("GROQ_AUDIT_MODEL", "llama-3.3-70b-versatile")
+AUDIT_MODEL = secret("GROQ_AUDIT_MODEL", "groq/compound")
 GROQ_BASE_URL = secret("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
 # ---- Pipeline tuning -----------------------------------------------------
