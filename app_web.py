@@ -451,9 +451,9 @@ def sentiment_badge(sentiment) -> str:
     ValueError and the Call Report page died on any call that had sentiment.
     """
     styles = {
-        "Positive": ("badge-passed"),
-        "Neutral": ("badge-neutral"),
-        "Negative": ("badge-critical"),
+        "Positive": ("badge-passed", "🙂"),
+        "Neutral": ("badge-neutral", "😐"),
+        "Negative": ("badge-critical", "🙁"),
     }
     cls, icon = styles.get(sentiment, ("badge-neutral", "❔"))
     return f"<span class='status-badge {cls}'>{icon} {esc(sentiment or 'Unknown')}</span>"
@@ -758,7 +758,7 @@ def view_login():
     with mid:
         st.markdown(
             "<div class='cg-brand' style='justify-content:center;margin-bottom:14px;'>"
-            "<div class='mark'></div>"
+            "<div class='mark'>🎧</div>"
             f"<div><div class='name' style='font-size:20px;'>{APP_NAME}</div>"
             f"<div class='sub'>{APP_TAGLINE}</div></div></div>",
             unsafe_allow_html=True,
@@ -877,10 +877,10 @@ def active_nav_key():
 # ==========================================================================
 
 NAV_ITEMS = [
-    ("Dashboard", " Dashboard"),
-    ("Agents", " Agents"),
-    ("Auditor", " audit"),
-    ("Settings", "  Settings"),
+    ("Dashboard", "📊  Dashboard"),
+    ("Agents", "👥  Agents"),
+    ("Auditor", "🎙️  Run audit"),
+    ("Settings", "⚙️  Settings"),
 ]
 
 with st.sidebar:
@@ -1079,7 +1079,7 @@ def view_dashboard():
 
     # --- Filters: one row above the content -------------------------------
     search_query = st.text_input(
-        "Search", placeholder=" Agent name, agent ID, or call ID",
+        "Search", placeholder="🔍  Agent name, agent ID, or call ID",
         label_visibility="collapsed", key="dash_search",
     )
 
@@ -1180,7 +1180,7 @@ def view_dashboard():
 
     if not total:
         st.markdown(empty_state(
-            "Nothing matches these filters",
+            "🗂️", "Nothing matches these filters",
             "Try widening the date range, clearing the search box, or choosing All Teams."
         ), unsafe_allow_html=True)
         return
@@ -1223,7 +1223,7 @@ def view_dashboard():
             cols[3].markdown(
                 f"<div class='cg-cell'>{esc(fmt_duration(row['duration_seconds']))}</div>",
                 unsafe_allow_html=True)
-            adjusted = "<div class='sub'> adjusted</div>" if row["manually_adjusted"] else ""
+            adjusted = "<div class='sub'>✎ adjusted</div>" if row["manually_adjusted"] else ""
             cols[4].markdown(score_cell(row["qa_score"]) + adjusted, unsafe_allow_html=True)
             cols[5].markdown(status_badge(row["status"]), unsafe_allow_html=True)
             if cols[6].button("Open →", key=f"open_call_{row['call_id']}",
@@ -1247,7 +1247,7 @@ def view_dashboard():
     """, params)
 
     if df_critical.empty:
-        st.markdown(empty_state("No critical calls in this range",
+        st.markdown(empty_state("🛡️", "No critical calls in this range",
                                 "Every audited call scored at or above 5.0."),
                     unsafe_allow_html=True)
         return
@@ -1321,7 +1321,7 @@ def view_agents():
         st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
     search = st.text_input("Search agents", key="agent_search",
-                           placeholder="  Search by agent name or agent ID",
+                           placeholder="🔍  Search by agent name or agent ID",
                            label_visibility="collapsed")
 
     query = """
@@ -1442,7 +1442,7 @@ def view_agent_details():
 
     if df_calls.empty:
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-        st.markdown(empty_state( "No calls recorded for this agent yet",
+        st.markdown(empty_state("📞", "No calls recorded for this agent yet",
                                 "Upload recordings from the Run audit screen to populate this page."),
                     unsafe_allow_html=True)
         return
@@ -1562,11 +1562,11 @@ def view_call_report():
         if call["status"] == "In Review":
             st.markdown(
                 "<div style='text-align:center;color:var(--info);font-size:12.5px;'>"
-                " Already flagged for review</div>", unsafe_allow_html=True)
-        elif st.button(" Flag for manual review", use_container_width=True,
+                "🔵 Already flagged for review</div>", unsafe_allow_html=True)
+        elif st.button("⚑  Flag for manual review", use_container_width=True,
                        key=f"flag_{call_id}"):
             execute_query("UPDATE calls SET status = ? WHERE id = ?", ("In Review", call_id))
-            toast("Flagged for manual review.")
+            toast("Flagged for manual review.", "⚑")
             st.rerun()
 
     st.divider()
@@ -1598,7 +1598,7 @@ def view_call_report():
             elif delta < 0:
                 note, color = "📉  Declined during the call — worth listening to.", C_CRIT
             elif start_sentiment == "Negative":
-                note, color = "  Stayed negative — no de-escalation.", C_WARN
+                note, color = "⚠️  Stayed negative — no de-escalation.", C_WARN
             elif start_sentiment == "Positive":
                 note, color = "Held positive throughout.", C_GOOD
             else:
@@ -1620,13 +1620,13 @@ def view_call_report():
             else:
                 st.info("Audio file archived or unavailable on this host.")
 
-        with st.expander("  Executive summary", expanded=True):
+        with st.expander("📝  Executive summary", expanded=True):
             st.write(call["summary"] or "_No summary was generated for this call._")
 
-        with st.expander("  Recommended coaching", expanded=True):
+        with st.expander("🎓  Recommended coaching", expanded=True):
             st.write(call["recommended_coaching"] or "_No coaching notes generated._")
 
-        with st.expander(" Transcript", expanded=False):
+        with st.expander("🗒️  Transcript", expanded=False):
             transcript = call["transcription"] or ""
             if transcript:
                 st.text_area("Transcript", transcript, height=280,
@@ -1650,14 +1650,14 @@ def view_call_report():
             if violations:
                 for violation in violations:
                     st.markdown(
-                        f"<div class='audit-row-err'> <span>{esc(violation)}</span></div>",
+                        f"<div class='audit-row-err'>⚠️ <span>{esc(violation)}</span></div>",
                         unsafe_allow_html=True)
             else:
                 st.markdown(
-                    "<div class='audit-row-ok'> <span>No compliance violations detected.</span></div>",
+                    "<div class='audit-row-ok'>✅ <span>No compliance violations detected.</span></div>",
                     unsafe_allow_html=True)
 
-        with st.expander("  Grammar analysis", expanded=True):
+        with st.expander("✍️  Grammar analysis", expanded=True):
             try:
                 grammar = json.loads(call["grammar_feedback"] or "[]")
                 grammar = grammar if isinstance(grammar, list) else []
@@ -1677,16 +1677,16 @@ def view_call_report():
                         st.caption(item["reason"])
             else:
                 st.markdown(
-                    "<div class='audit-row-ok'> <span>No grammar issues detected.</span></div>",
+                    "<div class='audit-row-ok'>✅ <span>No grammar issues detected.</span></div>",
                     unsafe_allow_html=True)
 
-        with st.expander(" Manager notes", expanded=True):
+        with st.expander("🗒️  Manager notes", expanded=True):
             with st.form(f"notes_form_{call_id}"):
                 notes = st.text_area(
                     "Notes", value=call["manager_notes"] or "", height=110,
                     label_visibility="collapsed",
                     placeholder="Add manager notes for this call…")
-                save_notes = st.form_submit_button(" Save notes", type="primary")
+                save_notes = st.form_submit_button("💾  Save notes", type="primary")
             if save_notes:
                 # UPSERT: a call with no report row would otherwise silently
                 # discard the note (UPDATE ... WHERE call_id matched nothing).
@@ -1697,13 +1697,13 @@ def view_call_report():
                 toast("Notes saved.", "💾")
                 st.rerun()
 
-        with st.expander("Override score", expanded=False):
+        with st.expander("⚖️  Override score", expanded=False):
             st.caption("Manually correct the AI score. Status follows automatically.")
             with st.form(f"score_form_{call_id}"):
                 new_score = st.number_input(
                     "QA score", min_value=0.0, max_value=10.0, step=0.1,
                     value=float(score) if score is not None else 0.0)
-                save_score = st.form_submit_button(" Save score", type="primary")
+                save_score = st.form_submit_button("💾  Save score", type="primary")
             if save_score:
                 new_score = round(float(new_score), 1)
                 new_status = ("Passed" if new_score >= PASS_THRESHOLD
@@ -1711,7 +1711,7 @@ def view_call_report():
                 execute_query(
                     "UPDATE calls SET qa_score = ?, status = ?, manually_adjusted = 1 WHERE id = ?",
                     (new_score, new_status, call_id))
-                toast(f"Score updated to {new_score:.1f} ({new_status}).")
+                toast(f"Score updated to {new_score:.1f} ({new_status}).", "⚖️")
                 st.rerun()
 
 
@@ -1966,7 +1966,7 @@ def view_auditor():
         agent_team = c3.text_input("Team", placeholder="e.g. billing — night shift")
 
         uploaded_files = st.file_uploader(
-            "Audio recordings", type=ALLOWED_AUDIO, accept_multiple_files=True
+            "Audio recordings", type=ALLOWED_AUDIO, accept_multiple_files=True)
         st.caption(
             f"Up to {MAX_UPLOAD_MB:.0f} MB per file — anything larger is skipped "
             "with a note rather than failing mid-batch.")
@@ -1981,7 +1981,7 @@ def view_auditor():
             f"Files are committed in chunks of {CHUNK_SIZE}, so a closed tab "
             "costs you at most one chunk.</div>", unsafe_allow_html=True)
 
-        submitted = st.form_submit_button("Run audit", type="primary")
+        submitted = st.form_submit_button("▶  Run audit", type="primary")
 
     if submitted:
         st.session_state.workers = workers
@@ -2168,7 +2168,7 @@ def view_settings():
             off_en = o1.text_area("English ", value="\n".join(rules["english_offensive"]), height=130)
             off_es = o2.text_area("Spanish ", value="\n".join(rules["spanish_offensive"]), height=130)
 
-            saved = st.form_submit_button("Save rules", type="primary")
+            saved = st.form_submit_button("💾  Save rules", type="primary")
 
         if saved:
             def clean(text):
@@ -2187,7 +2187,7 @@ def view_settings():
                     "english_offensive": clean(off_en),
                     "spanish_offensive": clean(off_es),
                 })
-                toast("Rules saved. They apply to the next audit you run.")
+                toast("Rules saved. They apply to the next audit you run.", "💾")
             except OSError as exc:
                 st.error(f"Could not save the rules file: {exc}")
 
@@ -2217,7 +2217,7 @@ def view_settings():
             "restart or redeploy — the database and stored audio go with it. Point "
             "`CALLGUARD_DATA_DIR` at a mounted volume, or move to Postgres/S3, before "
             "you rely on this for records retention.",
-            icon=".",
+            icon="⚠️",
         )
 
         st.markdown("##### Cleanup")
@@ -2235,7 +2235,7 @@ def view_settings():
                         removed += 1
                     except OSError:
                         pass
-            toast(f"Removed {removed} orphaned file(s).")
+            toast(f"Removed {removed} orphaned file(s).", "🧹")
             st.rerun()
 
     with about_tab:
