@@ -10,12 +10,14 @@ CHANGELOG.md for the full list of defects fixed and enhancements added.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import html
 import json
 import math
 import os
 import random
+import re
 import sqlite3
 import tempfile
 import time
@@ -54,8 +56,69 @@ def secret(name: str, default: str = "") -> str:
     return str(value or os.environ.get(name, default) or "")
 
 
-SERVER_GROQ_KEY = secret("GROQ_API_KEY")
+def first_secret(*names, default=""):
+    """First non-empty secret from `names`, else `default`.
+
+    Lets the newer provider-neutral names take precedence while the older
+    GROQ_* names keep working, so an existing deployment does not break.
+    """
+    for name in names:
+        value = secret(name)
+        if value:
+            return value
+    return default
+
+
 APP_PASSWORD = secret("APP_PASSWORD")
+
+# ==========================================================================
+# PROVIDERS
+# --------------------------------------------------------------------------
+# Transcription and auditing are two independent OpenAI-compatible endpoints,
+# because they are NOT interchangeable:
+#
+#   * OpenRouter exposes chat completions only — it has no /audio/transcriptions
+#     endpoint, so speech-to-text CANNOT run there.
+#   * Groq hosts Whisper, so transcription stays there (or any other Whisper
+#     host you point it at).
+#
+# Each side gets its own key, base URL and model. Set only what you use.
+# ==========================================================================
+
+# ---- Speech to text ------------------------------------------------------
+TRANSCRIBE_API_KEY = first_secret("TRANSCRIBE_API_KEY", "GROQ_API_KEY")
+TRANSCRIBE_BASE_URL = first_secret("TRANSCRIBE_BASE_URL", "GROQ_BASE_URL",
+                                   default="https://api.groq.com/openai/v1")
+TRANSCRIBE_MODEL = first_secret("TRANSCRIBE_MODEL", "GROQ_TRANSCRIBE_MODEL",
+                                default="whisper-large-v3")
+
+# ---- The auditing LLM ----------------------------------------------------
+# Defaults to OpenRouter + Qwen3 235B A22B. Set AUDIT_BASE_URL/AUDIT_MODEL to
+# point anywhere else that speaks the OpenAI chat-completions API.
+AUDIT_API_KEY = first_secret("AUDIT_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY")
+AUDIT_BASE_URL = first_secret("AUDIT_BASE_URL",
+                              default="https://openrouter.ai/api/v1")
+AUDIT_MODEL = first_secret("AUDIT_MODEL", "GROQ_AUDIT_MODEL",
+                           default="qwen/qwen3-235b-a22b")
+
+IS_OPENROUTER = "openrouter.ai" in AUDIT_BASE_URL.lower()
+
+# Optional OpenRouter attribution headers — they put your app on the
+# OpenRouter leaderboards. Harmless and ignored by every other provider.
+APP_PUBLIC_URL = secret("CALLGUARD_APP_URL")
+AUDIT_HEADERS = {}
+if IS_OPENROUTER:
+    if APP_PUBLIC_URL:
+        AUDIT_HEADERS["HTTP-Referer"] = APP_PUBLIC_URL
+    AUDIT_HEADERS["X-Title"] = "CallGuard"
+
+# Qwen3 235B A22B is 32K context by default (131K with YaRN). A very long call
+# plus the prompt could overflow it, which fails the whole file. Trim what is
+# SENT to the auditor; the full transcript is always stored in the database.
+try:
+    MAX_TRANSCRIPT_CHARS = int(secret("CALLGUARD_MAX_TRANSCRIPT_CHARS", "48000") or 48000)
+except ValueError:
+    MAX_TRANSCRIPT_CHARS = 48000
 
 # The working directory is ephemeral on most hosts (Streamlit Community Cloud
 # included). Point CALLGUARD_DATA_DIR at a mounted volume to keep data.
@@ -64,10 +127,6 @@ DB_FILE = os.path.join(DATA_DIR, "enterprise_qa.db")
 BANNED_WORDS_FILE = os.path.join(DATA_DIR, "banned_words.json")
 AUDIO_DIR = os.path.join(DATA_DIR, "audio_store")
 os.makedirs(AUDIO_DIR, exist_ok=True)
-
-TRANSCRIBE_MODEL = secret("GROQ_TRANSCRIBE_MODEL", "whisper-large-v3")
-AUDIT_MODEL = secret("GROQ_AUDIT_MODEL", "groq/compound")
-GROQ_BASE_URL = secret("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
 # ---- Pipeline tuning -----------------------------------------------------
 # Workers = calls in flight at once. Keep at or below your Groq RPM budget
@@ -492,6 +551,11 @@ def kpi(label, value, sub="", accent="info") -> str:
     )
 
 
+def short_url(url) -> str:
+    """Endpoint shown as an identifier, not an auto-linked hyperlink."""
+    return re.sub(r"^https?://", "", str(url or "")).rstrip("/")
+
+
 def empty_state(title, body) -> str:
     return (
         f"<div class='cg-empty'>"
@@ -587,6 +651,147 @@ def as_bool(value) -> bool:
 # ==========================================================================
 # 4. DATABASE LAYER
 # ==========================================================================
+
+def _fingerprint(*parts) -> str:
+    """Short, non-reversible tag, so caches re-check when a key or endpoint
+    changes while the key itself is never stored in the cache key."""
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def transcribe_client():
+    return OpenAI(api_key=TRANSCRIBE_API_KEY, base_url=TRANSCRIBE_BASE_URL, timeout=300.0)
+
+
+def audit_client():
+    return OpenAI(api_key=AUDIT_API_KEY, base_url=AUDIT_BASE_URL,
+                  timeout=300.0, default_headers=AUDIT_HEADERS or None)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _list_models(base_url: str, _fp: str, _key: str) -> tuple:
+    """Model IDs an endpoint will serve to this key.
+
+    Empty tuple means the check itself failed (offline, bad key, endpoint with
+    no /models route) — callers treat that as "couldn't check" and fail open
+    rather than blocking a run on a flaky network.
+    """
+    if not _key:
+        return ()
+    try:
+        client = OpenAI(api_key=_key, base_url=base_url, timeout=30.0)
+        return tuple(sorted(m.id for m in client.models.list().data))
+    except Exception:
+        return ()
+
+
+PROVIDERS = (
+    ("Transcription", "TRANSCRIBE"),
+    ("Audit", "AUDIT"),
+)
+
+
+def provider_status():
+    """One row per provider: what is configured and whether it is reachable."""
+    rows = []
+    for label, prefix in PROVIDERS:
+        key = TRANSCRIBE_API_KEY if prefix == "TRANSCRIBE" else AUDIT_API_KEY
+        base = TRANSCRIBE_BASE_URL if prefix == "TRANSCRIBE" else AUDIT_BASE_URL
+        model = TRANSCRIBE_MODEL if prefix == "TRANSCRIBE" else AUDIT_MODEL
+        models = _list_models(base, _fingerprint(key, base), key) if key else ()
+        rows.append({
+            "label": label,
+            "prefix": prefix,
+            "key_set": bool(key),
+            "base_url": base,
+            "model": model,
+            "models": models,
+            # None = could not check. True/False = definitely present/absent.
+            "model_ok": None if not models else (model in models),
+        })
+    return rows
+
+
+def missing_models(rows=None):
+    """Configured models we know for certain the key cannot reach."""
+    rows = rows if rows is not None else provider_status()
+    return [r for r in rows if r["model_ok"] is False]
+
+
+def similar_models(candidates, wanted, limit=12):
+    """Best-effort suggestions when a model ID is wrong.
+
+    OpenRouter serves 300+ IDs, so dumping the whole list is useless — match
+    on the meaningful word-parts of what was asked for instead.
+    """
+    tokens = [t for t in re.split(r"[^a-z0-9.]+", wanted.lower()) if len(t) > 2]
+    scored = []
+    for candidate in candidates:
+        low = candidate.lower()
+        score = sum(1 for t in tokens if t in low)
+        if score:
+            scored.append((score, candidate))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    return [c for _, c in scored[:limit]]
+
+
+# --------------------------------------------------------------------------
+# Tolerant JSON parsing
+# --------------------------------------------------------------------------
+# Qwen3 235B A22B is a hybrid reasoning model. OpenRouter normally puts its
+# chain of thought in a separate `reasoning` field, but not every upstream
+# provider does — some inline <think> blocks, some wrap the answer in a code
+# fence, some add a sentence before the JSON. A strict json.loads() on the
+# raw content turns any of those into a lost file, so parse defensively.
+
+_THINK_RE = re.compile(r"<think[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
+_OPEN_THINK_RE = re.compile(r"<think[^>]*>.*", re.DOTALL | re.IGNORECASE)
+_FENCE_RE = re.compile(r"```[a-zA-Z]*\s*|```", re.MULTILINE)
+
+
+def extract_json(text):
+    """Best-effort dict out of a chat completion. None if there isn't one."""
+    if not text or not isinstance(text, str):
+        return None
+
+    cleaned = _THINK_RE.sub("", text)          # complete <think>...</think>
+    cleaned = _OPEN_THINK_RE.sub("", cleaned)  # unterminated <think> at the end
+    cleaned = _FENCE_RE.sub("", cleaned).strip()
+
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Fall back to brace matching, so prose either side of the object is fine.
+    start = cleaned.find("{")
+    if start == -1:
+        return None
+    depth, in_string, escaped = 0, False, False
+    for index in range(start, len(cleaned)):
+        char = cleaned[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(cleaned[start:index + 1])
+                    return parsed if isinstance(parsed, dict) else None
+                except (json.JSONDecodeError, ValueError):
+                    return None
+    return None
+
 
 @contextmanager
 def db():
@@ -921,8 +1126,8 @@ with st.sidebar:
     )
 
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
-    if not SERVER_GROQ_KEY:
-        st.warning("No API key configured — audits are disabled.")
+    if not TRANSCRIBE_API_KEY or not AUDIT_API_KEY:
+        st.warning("API key missing — audits are disabled.")
 
     st.divider()
     if st.button("Log out", use_container_width=True, key="logout_btn"):
@@ -1881,8 +2086,25 @@ def score_result(result):
     }
 
 
-def process_one_call(client, banned_rules, filename, audio_bytes, call_uid):
-    """Runs in a worker thread. Returns a plain dict — never touches st.* or the DB."""
+def audit_request_extras():
+    """Provider-specific body fields for the audit call.
+
+    require_parameters makes OpenRouter route only to upstream providers that
+    actually honour response_format — without it a request can silently land
+    on one that ignores JSON mode and returns prose.
+    """
+    if IS_OPENROUTER:
+        return {"provider": {"require_parameters": True}}
+    return {}
+
+
+def process_one_call(clients, banned_rules, filename, audio_bytes, call_uid):
+    """Runs in a worker thread. Returns a plain dict — never touches st.* or the DB.
+
+    `clients` is (transcribe_client, audit_client). They are separate because
+    transcription and auditing can live on different providers.
+    """
+    speech, auditor = clients
     ext = (os.path.splitext(filename)[1] or ".mp3").lower()
     audio_path = os.path.join(AUDIO_DIR, f"{call_uid}{ext}")
     try:
@@ -1892,7 +2114,7 @@ def process_one_call(client, banned_rules, filename, audio_bytes, call_uid):
         def _transcribe():
             # Re-opened per attempt: a spent file handle can't be replayed.
             with open(audio_path, "rb") as fh:
-                return client.audio.transcriptions.create(
+                return speech.audio.transcriptions.create(
                     model=TRANSCRIBE_MODEL, file=fh, response_format="verbose_json")
 
         transcription = call_with_backoff(_transcribe)
@@ -1902,24 +2124,32 @@ def process_one_call(client, banned_rules, filename, audio_bytes, call_uid):
         if not transcript_text:
             raise ValueError("the transcription came back empty — is the audio silent?")
 
+        # The full transcript is stored; only what we SEND is trimmed, so a
+        # very long call cannot overflow the audit model's context window.
+        prompt_transcript = transcript_text
+        truncated = len(transcript_text) > MAX_TRANSCRIPT_CHARS
+        if truncated:
+            prompt_transcript = (transcript_text[:MAX_TRANSCRIPT_CHARS]
+                                 + " [transcript truncated for audit]")
+
         response = call_with_backoff(
-            client.chat.completions.create,
+            auditor.chat.completions.create,
             model=AUDIT_MODEL,
             temperature=0.1,
             response_format={"type": "json_object"},
             messages=[{"role": "user",
-                       "content": build_audit_prompt(transcript_text, banned_rules)}],
+                       "content": build_audit_prompt(prompt_transcript, banned_rules)}],
+            extra_body=audit_request_extras() or None,
         )
 
-        content = response.choices[0].message.content or ""
-        try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
+        message = response.choices[0].message
+        content = getattr(message, "content", "") or ""
+        result = extract_json(content)
+        if result is None:
+            preview = " ".join(content.split())[:120]
             return {"ok": False, "filename": filename, "audio_path": audio_path,
-                    "error": "the model did not return valid JSON"}
-        if not isinstance(result, dict):
-            return {"ok": False, "filename": filename, "audio_path": audio_path,
-                    "error": "the model returned an unexpected shape"}
+                    "error": (f"the audit model did not return JSON"
+                              + (f" (got: {preview}...)" if preview else " (empty response)"))}
 
         scored = score_result(result)
         return {
@@ -1929,6 +2159,7 @@ def process_one_call(client, banned_rules, filename, audio_bytes, call_uid):
             "audio_path": audio_path,
             "transcript_text": transcript_text,
             "duration_seconds": duration_seconds,
+            "truncated": truncated,
             "language": result.get("language"),
             "audit_summary": result.get("audit_summary"),
             "recommended_coaching": result.get("recommended_coaching"),
@@ -1940,8 +2171,13 @@ def process_one_call(client, banned_rules, filename, audio_bytes, call_uid):
                 os.remove(audio_path)
             except OSError:
                 pass
+        message = str(exc) or exc.__class__.__name__
+        if "model_not_found" in message or "does not exist or you do not have access" in message:
+            message = (f"model unavailable — check GROQ_AUDIT_MODEL "
+                       f"({AUDIT_MODEL}) and GROQ_TRANSCRIBE_MODEL "
+                       f"({TRANSCRIBE_MODEL}) in your secrets")
         return {"ok": False, "filename": filename, "audio_path": audio_path,
-                "error": str(exc) or exc.__class__.__name__}
+                "error": message}
 
 
 def audio_store_stats():
@@ -2017,8 +2253,13 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files):
     if not uploaded_files:
         st.error("Upload at least one audio file.")
         return
-    if not SERVER_GROQ_KEY:
-        st.error("No API key configured. Add `GROQ_API_KEY` to your secrets and reload.")
+    if not TRANSCRIBE_API_KEY:
+        st.error("No transcription key. Add `TRANSCRIBE_API_KEY` (or `GROQ_API_KEY`) "
+                 "to your secrets and reload.")
+        return
+    if not AUDIT_API_KEY:
+        st.error("No audit key. Add `OPENROUTER_API_KEY` (or `AUDIT_API_KEY`) "
+                 "to your secrets and reload.")
         return
 
     # Reject oversized files up front rather than paying for a failed request.
@@ -2036,7 +2277,22 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files):
         st.error("Every file was rejected. Compress the audio and try again.")
         return
 
-    client = OpenAI(api_key=SERVER_GROQ_KEY, base_url=GROQ_BASE_URL, timeout=300.0)
+    # Preflight: a wrong or retired model ID would otherwise fail once per
+    # file with a raw 404 — and for the audit model, only AFTER paying for the
+    # transcription. Check both providers before spending anything.
+    for row in missing_models():
+        st.error(
+            f"{row['label']} model `{row['model']}` is not available at "
+            f"`{short_url(row['base_url'])}`. Set `{row['prefix']}_MODEL` in your secrets "
+            "to one of these and reload."
+        )
+        suggestions = similar_models(row["models"], row["model"])
+        st.code("\n".join(suggestions) or "no similar model IDs found",
+                language="text")
+    if missing_models():
+        return
+
+    clients = (transcribe_client(), audit_client())
     banned_rules = load_banned_rules()
     upsert_agent(agent_id, agent_name, agent_team, f"{agent_id}@company.com")
 
@@ -2060,7 +2316,7 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files):
                 # .getbuffer() must be read on the main thread — Streamlit's
                 # UploadedFile is not thread-safe.
                 payload = uploaded.getbuffer().tobytes()
-                futures[pool.submit(process_one_call, client, banned_rules,
+                futures[pool.submit(process_one_call, clients, banned_rules,
                                     uploaded.name, payload, call_uid)] = uploaded.name
 
             for future in as_completed(futures):
@@ -2093,9 +2349,12 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files):
                 ))
                 pending.append((outcome["call_uid"], outcome["filename"],
                                 outcome["final_score"], outcome["call_status"]))
+                note = (" — long call, transcript trimmed for the audit"
+                        if outcome.get("truncated") else "")
                 log.markdown(
                     f"<div class='audit-row-ok'><b>{esc(outcome['filename'])}</b> — "
-                    f"{outcome['final_score']}/10 {status_badge(outcome['call_status'])}</div>",
+                    f"{outcome['final_score']}/10 {status_badge(outcome['call_status'])}"
+                    f"<span style='color:var(--text-3)'>{esc(note)}</span></div>",
                     unsafe_allow_html=True)
 
         # One transaction per chunk: calls and their reports land together or
@@ -2237,17 +2496,54 @@ def view_settings():
 <div class='cg-panel'>
   <div style='font-size:14px;font-weight:600;'>{APP_NAME} · {APP_TAGLINE}</div>
   <div style='color:var(--text-2);font-size:13px;margin-top:10px;line-height:1.7;'>
-    Transcription model &nbsp;<span class='id-chip'>{esc(TRANSCRIBE_MODEL)}</span><br>
-    Audit model &nbsp;<span class='id-chip'>{esc(AUDIT_MODEL)}</span><br>
-    Endpoint &nbsp;<span class='id-chip'>{esc(GROQ_BASE_URL)}</span><br>
-    Parallel workers &nbsp;<span class='id-chip'>{AUDIT_WORKERS}</span><br>
-    API key &nbsp;<span class='id-chip'>{'configured' if SERVER_GROQ_KEY else 'missing'}</span>
+    Transcription &nbsp;<span class='id-chip'>{esc(TRANSCRIBE_MODEL)}</span>
+      at <span class='id-chip'>{esc(short_url(TRANSCRIBE_BASE_URL))}</span>
+      &nbsp;<span class='id-chip'>{'key set' if TRANSCRIBE_API_KEY else 'NO KEY'}</span><br>
+    Audit &nbsp;<span class='id-chip'>{esc(AUDIT_MODEL)}</span>
+      at <span class='id-chip'>{esc(short_url(AUDIT_BASE_URL))}</span>
+      &nbsp;<span class='id-chip'>{'key set' if AUDIT_API_KEY else 'NO KEY'}</span><br>
+    Parallel workers &nbsp;<span class='id-chip'>{AUDIT_WORKERS}</span>
   </div>
   <div style='color:var(--text-3);font-size:12px;margin-top:14px;'>
     Built by {esc(BUILT_BY)} · All rights reserved
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+        st.markdown("##### Provider health")
+        st.caption(
+            "Transcription and auditing are separate endpoints. Providers retire "
+            "model IDs on their own schedules, so this checks each configured "
+            "model against what its key can actually reach.")
+
+        for row in provider_status():
+            with st.container():
+                st.markdown(f"**{row['label']}** &nbsp; "
+                            f"<span class='id-chip'>{esc(row['model'])}</span> &nbsp; "
+                            f"<span class='id-chip'>{esc(short_url(row['base_url']))}</span>",
+                            unsafe_allow_html=True)
+                if not row["key_set"]:
+                    st.info(f"No key set for {row['label'].lower()} "
+                            f"(`{row['prefix']}_API_KEY`).")
+                elif row["model_ok"] is None:
+                    st.warning("Could not reach this endpoint to list models. "
+                               "Check the key and the base URL.")
+                elif row["model_ok"]:
+                    st.success(f"Model available ({len(row['models'])} models "
+                               f"reachable at this endpoint).")
+                else:
+                    st.error(f"`{row['model']}` is NOT available here. "
+                             f"Set `{row['prefix']}_MODEL` to one of these:")
+                    st.code("\n".join(similar_models(row["models"], row["model"]))
+                            or "no similar model IDs found", language="text")
+                if row["models"]:
+                    with st.expander(f"Show all {len(row['models'])} model IDs "
+                                     f"at this endpoint", expanded=False):
+                        st.code("\n".join(row["models"]), language="text")
+
+        if st.button("Re-check now", key="recheck_models"):
+            _list_models.clear()
+            st.rerun()
 
         st.markdown("##### Scoring model")
         st.markdown("""
