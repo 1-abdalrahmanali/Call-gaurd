@@ -1,0 +1,14 @@
+# Save this as .streamlit/config.toml next to app_web.py
+[theme]
+base                      = "dark"
+primaryColor              = "#3987E5"
+backgroundColor           = "#0B0E14"
+secondaryBackgroundColor  = "#161C28"
+textColor                 = "#E9EDF4"
+font                      = "sans serif"
+
+[server]
+maxUploadSize = 100
+
+[browser]
+gatherUsageStats = false

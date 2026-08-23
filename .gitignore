@@ -1,0 +1,34 @@
+# ---- Secrets: never commit -----------------------------------------------
+.streamlit/secrets.toml
+secrets.toml
+*.env
+.env
+
+# ---- Runtime data: never commit ------------------------------------------
+# Real call recordings — customer voice data. Committing these to GitHub
+# publishes them permanently, even from a private repo's history.
+audio_store/
+
+# The database holds transcripts, scores and agent names.
+enterprise_qa.db
+enterprise_qa.db-wal
+enterprise_qa.db-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Written by the Settings page at runtime — keeping it out of git avoids
+# dirty diffs every time someone edits the rules in the UI.
+banned_words.json
+
+# ---- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ---- Editors / OS --------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
