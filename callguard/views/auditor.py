@@ -49,11 +49,7 @@ def view_auditor():
 
         uploaded_files = st.file_uploader(
             "Audio recordings", type=ALLOWED_AUDIO, accept_multiple_files=True)
-        # st.caption(
-        #     f"Maximum file size: {MAX_UPLOAD_MB:.0f} MB per file. Files exceeding "
-        #     "this limit will be skipped, and a notification will be provided."
-        #     Important:** Please keep this tab open until all calls have "
-        #            "been fully analyzed.")
+        st.caption("Please keep this tab open until all calls havebbeen fully analyzed.")
 
         submitted = st.form_submit_button("Run", type="primary")
 
