@@ -44,8 +44,8 @@ def view_auditor():
 
     with st.form("audit_form"):
         c1, c2, c3 = st.columns(3)
-        agent_name = c2.text_input("Agent name", placeholder="Lowercase only")
-        agent_id = c1.text_input("Agent ID", placeholder="numbers only")
+        agent_name = c1.text_input("Agent name", placeholder="Lowercase only")
+        agent_id = c2.text_input("Agent ID", placeholder="numbers only")
         agent_team = c3.text_input("account", placeholder="the name of the account")
 
         uploaded_files = st.file_uploader(
