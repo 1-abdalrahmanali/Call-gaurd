@@ -35,23 +35,28 @@ from callguard.providers import (
     similar_models,
     transcribe_client,
 )
+from callguard.accounts import current_username
 
 
 def view_auditor():
-    st.title("Run Analysis")
-    st.caption("Select calls, and start the analysis")
+    st.title("Run audit")
+    st.caption("Upload one or more recordings. Each file is transcribed, audited and scored.")
 
     with st.form("audit_form"):
         c1, c2, c3 = st.columns(3)
-        agent_id = c1.text_input("Agent ID", placeholder="only numbers")
-        agent_name = c2.text_input("Agent name", placeholder="Lowercase letters only")
-        agent_team = c3.text_input("Team", placeholder="Lowercase letters only")
+        agent_id = c1.text_input("Agent ID", placeholder="e.g. EMP-1042")
+        agent_name = c2.text_input("Agent name", placeholder="e.g. maria lopez")
+        agent_team = c3.text_input("Team", placeholder="e.g. billing — night shift")
 
         uploaded_files = st.file_uploader(
             "Audio recordings", type=ALLOWED_AUDIO, accept_multiple_files=True)
-        st.caption("Please keep this tab open until all calls havebbeen fully analyzed.")
+        st.caption(
+            f"Maximum file size: {MAX_UPLOAD_MB:.0f} MB per file. Files exceeding "
+            "this limit will be skipped, and a notification will be provided.")
+        st.caption("**Important:** Please keep this tab open until all calls have "
+                   "been fully analyzed.")
 
-        submitted = st.form_submit_button("Run", type="primary")
+        submitted = st.form_submit_button("Run audit", type="primary")
 
     if submitted:
         run_audit_batch(agent_id, agent_name, agent_team, uploaded_files)
@@ -129,6 +134,10 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files):
     if missing_models():
         return
 
+    # Read once, before any worker starts: every call in this batch is
+    # attributed to whoever is signed in right now.
+    uploader = current_username()
+
     clients = (transcribe_client(), audit_client())
     banned_rules = load_banned_rules()
     upsert_agent(agent_id, agent_name, agent_team)
@@ -177,7 +186,7 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files):
                     outcome["audio_path"], outcome["transcript_text"],
                     outcome["final_score"], outcome["grammar_score"],
                     outcome["call_status"], outcome["profanity_flag"],
-                    outcome["duration_seconds"],
+                    outcome["duration_seconds"], uploader,
                 ))
                 report_rows.append((
                     outcome["call_uid"], outcome["language"], outcome["audit_summary"],
@@ -210,8 +219,8 @@ def run_audit_batch(agent_id, agent_name, agent_team, uploaded_files):
             execute_batch([
                 ("""INSERT INTO calls (id, agent_id, date, duration, audio_file, transcription,
                                        qa_score, grammar_score, status, profanity_detected,
-                                       duration_seconds)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", call_rows),
+                                       duration_seconds, uploaded_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", call_rows),
                 ("""INSERT INTO reports (call_id, language, summary, violations, grammar_feedback,
                                          manager_notes, recommended_coaching,
                                          sentiment_start, sentiment_end)

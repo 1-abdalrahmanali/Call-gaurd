@@ -26,6 +26,7 @@ from callguard.formatting import (
     status_badge,
 )
 from callguard.navigation import navigate_to
+from callguard.accounts import display_name
 
 
 STATUS_PRESETS = {
@@ -152,7 +153,8 @@ def view_dashboard():
     offset = min(st.session_state.page, max(0, math.ceil(total / PAGE_SIZE) - 1)) * PAGE_SIZE
     df_calls = run_query(f"""
         SELECT c.id AS call_id, a.name AS agent_name, a.id AS employee_id,
-               c.date, c.duration_seconds, c.qa_score, c.status, c.manually_adjusted
+               c.date, c.duration_seconds, c.qa_score, c.status, c.manually_adjusted,
+               c.uploaded_by
         FROM calls c JOIN agents a ON c.agent_id = a.id
         WHERE {clause}
         ORDER BY c.date DESC
@@ -174,9 +176,9 @@ def view_dashboard():
         mime="text/csv", use_container_width=True, key="dash_export",
     )
 
-    widths = [2.4, 1.6, 1.5, 1.0, 1.2, 1.3, 1.1]
+    widths = [2.1, 1.45, 1.3, 0.85, 1.1, 1.2, 1.3, 1.0]
     render_column_headers(widths, ["Agent", "Call ID", "Date", "Length",
-                                   "QA Score", "Status", ""])
+                                   "QA Score", "Status", "Uploaded by", ""])
 
     for _, row in df_calls.iterrows():
         with row_container():
@@ -196,7 +198,10 @@ def view_dashboard():
             adjusted = "<div class='sub'>adjusted</div>" if row["manually_adjusted"] else ""
             cols[4].markdown(score_cell(row["qa_score"]) + adjusted, unsafe_allow_html=True)
             cols[5].markdown(status_badge(row["status"]), unsafe_allow_html=True)
-            if cols[6].button("Open →", key=f"open_call_{row['call_id']}",
+            cols[6].markdown(
+                f"<div class='cg-by'>{esc(display_name(row['uploaded_by']))}</div>",
+                unsafe_allow_html=True)
+            if cols[7].button("Open →", key=f"open_call_{row['call_id']}",
                               use_container_width=True):
                 navigate_to("CallReport", call_id=row["call_id"])
                 st.rerun()

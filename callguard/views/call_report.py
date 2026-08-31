@@ -21,6 +21,7 @@ from callguard.formatting import (
 )
 from callguard.navigation import navigate_to
 from callguard.theme import C_CRIT, C_GOOD, C_MUTED_INK, C_WARN
+from callguard.accounts import display_name
 
 
 def view_call_report():
@@ -66,6 +67,7 @@ def view_call_report():
         f"{'  ·  ' + call['team'] if call['team'] else ''}"
         f"  ·  Audited {fmt_date(call['date'])}"
         f"{'  ·  ' + (call['language'] or '') if call['language'] else ''}"
+        f"  ·  Uploaded by {display_name(call['uploaded_by'])}"
     )
 
     raw_score = call["qa_score"]
