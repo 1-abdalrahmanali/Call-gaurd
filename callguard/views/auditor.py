@@ -39,24 +39,21 @@ from callguard.accounts import current_username
 
 
 def view_auditor():
-    st.title("Run audit")
+    st.title("Call Analyzer")
     st.caption("Upload one or more recordings. Each file is transcribed, audited and scored.")
 
     with st.form("audit_form"):
         c1, c2, c3 = st.columns(3)
-        agent_id = c1.text_input("Agent ID", placeholder="e.g. EMP-1042")
-        agent_name = c2.text_input("Agent name", placeholder="e.g. maria lopez")
-        agent_team = c3.text_input("Team", placeholder="e.g. billing — night shift")
+        agent_name = c2.text_input("Agent name", placeholder="Lowercase only")
+        agent_id = c1.text_input("Agent ID", placeholder="numbers only")
+        agent_team = c3.text_input("account", placeholder="the name of the account")
 
         uploaded_files = st.file_uploader(
             "Audio recordings", type=ALLOWED_AUDIO, accept_multiple_files=True)
-        st.caption(
-            f"Maximum file size: {MAX_UPLOAD_MB:.0f} MB per file. Files exceeding "
-            "this limit will be skipped, and a notification will be provided.")
         st.caption("**Important:** Please keep this tab open until all calls have "
                    "been fully analyzed.")
 
-        submitted = st.form_submit_button("Run audit", type="primary")
+        submitted = st.form_submit_button("Run", type="primary")
 
     if submitted:
         run_audit_batch(agent_id, agent_name, agent_team, uploaded_files)
