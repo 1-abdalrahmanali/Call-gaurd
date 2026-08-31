@@ -81,6 +81,16 @@ def kpi(label, value, sub="", accent="info") -> str:
         f"<div class='k-value'>{esc(value)}</div>"
         f"<div class='k-sub'>{esc(sub)}</div></div>"
     )
+def initials(name) -> str:
+    """Up to two initials for the sidebar avatar."""
+    parts = [p for p in str(name or "").split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+
 def short_url(url) -> str:
     """Endpoint shown as an identifier, not an auto-linked hyperlink."""
     return re.sub(r"^https?://", "", str(url or "")).rstrip("/")

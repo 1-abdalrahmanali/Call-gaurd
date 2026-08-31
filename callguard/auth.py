@@ -1,11 +1,17 @@
-"""Password gate."""
+"""Sign-in gate.
 
-import hmac
+Authentication lives in session state, which survives navigation, audits and
+reruns for as long as the browser tab stays open. A hard refresh starts a new
+Streamlit session and asks for credentials again — that is the trade for
+carrying no cookie dependency.
+"""
+
 import time
 
 import streamlit as st
 
-from callguard.config import APP_NAME, APP_PASSWORD, APP_TAGLINE, BUILT_BY
+from callguard.accounts import authenticate, load_accounts
+from callguard.config import APP_NAME, APP_TAGLINE, BUILT_BY
 
 
 MAX_LOGIN_ATTEMPTS = 5
@@ -24,12 +30,13 @@ def view_login():
             unsafe_allow_html=True,
         )
 
-        # FIXED: st.secrets["APP_PASSWORD"] raised a raw KeyError and dumped a
-        # traceback to the browser whenever the secret was not configured.
-        if not APP_PASSWORD:
+        # A missing configuration is reported, never guessed around — an app
+        # that let people in because no accounts were defined would be worse
+        # than one that refuses to start.
+        if not load_accounts():
             st.error(
-                "No password is configured. Add `APP_PASSWORD` to your Streamlit "
-                "secrets (or environment) and reload."
+                "No accounts are configured. Add a `[users]` section to your "
+                "Streamlit secrets and reload — see `secrets.toml.example`."
             )
             return
 
@@ -40,15 +47,18 @@ def view_login():
             return
 
         with st.form("login_form"):
+            username = st.text_input("Username", placeholder="Your username")
             password = st.text_input("Password", type="password",
-                                     placeholder="Enter your password")
+                                     placeholder="Your password")
             submitted = st.form_submit_button("Sign in", type="primary",
                                               use_container_width=True)
 
         # Handled outside the form block so st.rerun() isn't called mid-form.
         if submitted:
-            if hmac.compare_digest(password or "", APP_PASSWORD):
+            account = authenticate(username, password)
+            if account:
                 st.session_state.authenticated = True
+                st.session_state.user = account
                 st.session_state.login_attempts = 0
                 st.rerun()
             else:
@@ -59,14 +69,24 @@ def view_login():
                     st.session_state.login_attempts = 0
                     st.rerun()
                 left = MAX_LOGIN_ATTEMPTS - attempts
-                st.error(f"Incorrect password. {left} attempt{'s' if left != 1 else ''} left.")
+                # Deliberately does not say which half was wrong.
+                st.error(f"Incorrect username or password. "
+                         f"{left} attempt{'s' if left != 1 else ''} left.")
 
         st.caption(f"Built by {BUILT_BY} · All rights reserved")
 
 
 def require_login():
-    """Render the login screen and halt unless this session is authenticated."""
+    """Render the sign-in screen and halt unless this session is signed in."""
     st.session_state.setdefault("authenticated", False)
-    if not st.session_state.authenticated:
+    st.session_state.setdefault("user", None)
+    if not st.session_state.authenticated or not st.session_state.user:
         view_login()
         st.stop()
+
+
+def sign_out():
+    """Drop the identity and every piece of per-session view state."""
+    for key in ("authenticated", "user", "current_view", "selected_agent",
+                "selected_call", "previous_view", "last_audited_calls", "page"):
+        st.session_state.pop(key, None)

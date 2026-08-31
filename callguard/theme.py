@@ -79,6 +79,21 @@ section[data-testid="stSidebar"] > div {
 }
 .cg-brand .name { font-size:15px; font-weight:650; color:var(--text-1); line-height:1.15; }
 .cg-brand .sub  { font-size:11px; color:var(--text-3); letter-spacing:.03em; }
+.cg-user {
+  display:flex; align-items:center; gap:10px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 9px 11px; margin: 14px 4px 2px;
+}
+.cg-user .u-avatar {
+  width:30px; height:30px; flex:0 0 30px; border-radius:50%;
+  background: var(--accent-soft); border: 1px solid rgba(57,135,229,.45);
+  color: var(--accent); font-size:11.5px; font-weight:700; letter-spacing:.03em;
+  display:flex; align-items:center; justify-content:center;
+}
+.cg-user .u-name { font-size:12.5px; font-weight:600; color: var(--text-1); line-height:1.25; }
+.cg-user .u-role { font-size:10.5px; color: var(--text-3); letter-spacing:.02em; }
+.cg-by { font-size:12px; color: var(--text-2); }
+
 .cg-navlabel { font-size:10px; letter-spacing:.1em; text-transform:uppercase;
                color:var(--text-3); font-weight:600; margin: 14px 4px 6px; }
 .cg-sidefoot { font-size:11px; color:var(--text-3); line-height:1.6; padding: 0 4px; }

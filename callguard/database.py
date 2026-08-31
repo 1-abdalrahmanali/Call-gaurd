@@ -62,6 +62,9 @@ def init_db():
         ensure_columns(c, "calls", {
             "manually_adjusted": "INTEGER DEFAULT 0",
             "duration_seconds": "REAL",
+            # Username of the account that ran the audit. Nullable on purpose:
+            # calls recorded before multi-user login simply have no owner.
+            "uploaded_by": "TEXT",
         })
 
         # Without these, every dashboard filter was a full table scan.
@@ -69,6 +72,7 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_calls_date    ON calls(date DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_calls_status  ON calls(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_agents_team   ON agents(team)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_calls_uploader ON calls(uploaded_by)")
         conn.commit()
     return True
 def bump_data_version():

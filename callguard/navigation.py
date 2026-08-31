@@ -12,6 +12,9 @@ from callguard.config import (
 from callguard.database import run_query
 from callguard.formatting import esc
 from callguard.theme import C_CRIT, C_INFO
+from callguard.accounts import current_user
+from callguard.auth import sign_out
+from callguard.formatting import initials
 
 
 def sync_query_params(params):
@@ -87,6 +90,18 @@ def render_sidebar():
             unsafe_allow_html=True,
         )
 
+        _user = current_user()
+        if _user:
+            _role = (f"<div class='u-role'>{esc(_user['role'])}</div>"
+                     if _user.get("role") else "")
+            st.markdown(
+                "<div class='cg-user'>"
+                f"<div class='u-avatar'>{esc(initials(_user['name']))}</div>"
+                f"<div><div class='u-name'>{esc(_user['name'])}</div>{_role}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
         st.markdown("<div class='cg-navlabel'>Workspace</div>", unsafe_allow_html=True)
         _active = active_nav_key()
         for _key, _label in NAV_ITEMS:
@@ -116,9 +131,7 @@ def render_sidebar():
 
         st.divider()
         if st.button("Log out", use_container_width=True, key="logout_btn"):
-            for key in ("authenticated", "current_view", "selected_agent", "selected_call",
-                        "previous_view", "last_audited_calls", "page"):
-                st.session_state.pop(key, None)
+            sign_out()
             sync_query_params({})
             st.rerun()
 
